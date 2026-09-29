@@ -1,0 +1,15 @@
+{
+  "name": "webcal-mcp-sidecar",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "express": "5.1.0",
+    "node-ical": "0.22.1",
+    "zod": "3.25.76"
+  }
+}
