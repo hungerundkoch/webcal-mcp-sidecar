@@ -111,12 +111,16 @@ function calendarMetadata(parsed) {
     vcalendar?.['x-wr-calname'] ??
     vcalendar?.name ??
     '';
+  const discoveredTimezone =
+    vcalendar?.wr_timezone ??
+    vcalendar?.['x-wr-timezone'] ??
+    FALLBACK_TZ;
 
   return {
     calendar_id: 'webcal',
     name: CALENDAR_NAME_OVERRIDE || String(discoveredName || 'Webcal'),
     read_only: true,
-    timezone: FALLBACK_TZ,
+    timezone: validateTimezone(String(discoveredTimezone || FALLBACK_TZ)),
   };
 }
 
@@ -331,13 +335,7 @@ function expandEvent(event, from, to) {
 
   return instances
     .filter((instance) => String(instance?.status ?? event.status ?? '').toUpperCase() !== 'CANCELLED')
-    .map((instance) => normalizeOccurrence(event, instance))
-    .filter((occurrence) => {
-      const start = parseDate(occurrence.all_day ? `${occurrence.start}T00:00:00Z` : occurrence.start, 'occurrence start');
-      const endValue = occurrence.end || occurrence.start;
-      const end = parseDate(occurrence.all_day ? `${endValue}T00:00:00Z` : endValue, 'occurrence end');
-      return overlaps(start, end, from, to);
-    });
+    .map((instance) => normalizeOccurrence(event, instance));
 }
 
 function sortOccurrences(events) {
