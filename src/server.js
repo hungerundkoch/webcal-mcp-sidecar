@@ -9,6 +9,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 const PORT = Number.parseInt(process.env.PORT ?? '8000', 10);
 const DEFAULT_TZ = process.env.WEBCAL_DEFAULT_TZ ?? 'Europe/Berlin';
 const CALENDAR_NAME_OVERRIDE = process.env.WEBCAL_NAME?.trim() || '';
+const FEED_PURPOSE = (process.env.WEBCAL_PURPOSE ?? 'calendar').trim().toLowerCase();
 const CACHE_TTL_SECONDS = boundedInt(process.env.WEBCAL_CACHE_TTL_SECONDS, 300, 30, 86400);
 const FETCH_TIMEOUT_MS = boundedInt(process.env.WEBCAL_FETCH_TIMEOUT_MS, 15000, 1000, 120000);
 const MAX_BYTES = boundedInt(process.env.WEBCAL_MAX_BYTES, 5 * 1024 * 1024, 1024, 50 * 1024 * 1024);
@@ -120,6 +121,7 @@ function calendarMetadata(parsed) {
     calendar_id: 'webcal',
     name: CALENDAR_NAME_OVERRIDE || String(discoveredName || 'Webcal'),
     read_only: true,
+    purpose: FEED_PURPOSE,
     timezone: validateTimezone(String(discoveredTimezone || FALLBACK_TZ)),
   };
 }
@@ -230,6 +232,82 @@ function eventTimezone(event, instance) {
     FALLBACK_TZ
   );
 }
+
+function addDaysKey(dateKey, days) {
+  const [year, month, day] = dateKey.split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day + days, 12, 0, 0));
+  return date.toISOString().slice(0, 10);
+}
+
+function weekdayForDateKey(dateKey) {
+  const [year, month, day] = dateKey.split('-').map(Number);
+  return new Date(Date.UTC(year, month - 1, day, 12, 0, 0)).getUTCDay();
+}
+
+function timezoneOffsetMs(date, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date);
+
+  const get = (type) => Number(parts.find((part) => part.type === type)?.value);
+  const asUtc = Date.UTC(
+    get('year'),
+    get('month') - 1,
+    get('day'),
+    get('hour'),
+    get('minute'),
+    get('second'),
+  );
+  return asUtc - date.getTime();
+}
+
+function localMidnightUtc(dateKey, timeZone) {
+  const [year, month, day] = dateKey.split('-').map(Number);
+  const localAsUtc = Date.UTC(year, month - 1, day, 0, 0, 0);
+  let probe = new Date(localAsUtc);
+  let offset = timezoneOffsetMs(probe, timeZone);
+  probe = new Date(localAsUtc - offset);
+
+  const correctedOffset = timezoneOffsetMs(probe, timeZone);
+  if (correctedOffset !== offset) {
+    probe = new Date(localAsUtc - correctedOffset);
+  }
+
+  return probe;
+}
+
+function occurrenceBounds(occurrence, timeZone) {
+  if (occurrence.all_day) {
+    return {
+      start: localMidnightUtc(occurrence.start, timeZone),
+      end: localMidnightUtc(occurrence.end || addDaysKey(occurrence.start, 1), timeZone),
+    };
+  }
+
+  const start = parseDate(occurrence.start, 'occurrence start');
+  const end = occurrence.end
+    ? parseDate(occurrence.end, 'occurrence end')
+    : new Date(start.getTime() + 1);
+
+  return { start, end };
+}
+
+const WEEKDAYS = {
+  sunday: 0,
+  monday: 1,
+  tuesday: 2,
+  wednesday: 3,
+  thursday: 4,
+  friday: 5,
+  saturday: 6,
+};
 
 function textValue(value) {
   if (typeof value === 'string') return value;
@@ -417,6 +495,84 @@ function registerCalendarTools(server) {
       };
     },
   );
+
+  if (FEED_PURPOSE === 'absence') {
+    registerTool(
+      server,
+      'find_next_clear_weekday',
+      {
+        description: 'For an absence/leave feed, find the next requested weekday with zero overlapping absence events. No employee roster is needed: if the authoritative absence feed has no event on that day, everyone is present according to the feed. Do not consult unrelated calendars to prove presence.',
+        annotations: { readOnlyHint: true, openWorldHint: true },
+        inputSchema: {
+          weekday: z.enum(['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']).default('tuesday'),
+          start: z.string().optional().describe('ISO 8601 date/time to start searching from. Defaults to now.'),
+          days_ahead: z.number().int().min(1).max(730).default(180),
+          refresh: z.boolean().default(false).describe('Bypass the in-memory feed cache for this call.'),
+        },
+      },
+      async ({ weekday, start, days_ahead, refresh }) => {
+        const data = await fetchCalendar({ force: refresh });
+        const timeZone = data.metadata.timezone || FALLBACK_TZ;
+        const startInstant = start ? parseDate(start, 'start') : new Date();
+        const firstDate = localDateKey(startInstant, timeZone);
+        const from = localMidnightUtc(firstDate, timeZone);
+        const untilDate = addDaysKey(firstDate, days_ahead + 1);
+        const to = localMidnightUtc(untilDate, timeZone);
+
+        const occurrences = eventObjects(data.parsed)
+          .flatMap((event) => expandEvent(event, from, to));
+
+        const targetWeekday = WEEKDAYS[weekday];
+        const skipped = [];
+
+        for (let offset = 0; offset <= days_ahead; offset += 1) {
+          const date = addDaysKey(firstDate, offset);
+          if (weekdayForDateKey(date) !== targetWeekday) continue;
+
+          const dayStart = localMidnightUtc(date, timeZone);
+          const nextDate = addDaysKey(date, 1);
+          const dayEnd = localMidnightUtc(nextDate, timeZone);
+
+          const blockers = occurrences.filter((occurrence) => {
+            const bounds = occurrenceBounds(occurrence, timeZone);
+            return overlaps(bounds.start, bounds.end, dayStart, dayEnd);
+          });
+
+          if (blockers.length === 0) {
+            return {
+              status: 'ok',
+              calendar: data.metadata,
+              weekday,
+              date,
+              timezone: timeZone,
+              interpretation: 'No absence event overlaps this day, so everyone is present according to the configured absence feed.',
+              skipped,
+            };
+          }
+
+          skipped.push({
+            date,
+            absences: blockers.map((event) => ({
+              uid: event.uid,
+              summary: event.summary,
+              start: event.start,
+              end: event.end,
+            })),
+          });
+        }
+
+        return {
+          status: 'not_found',
+          calendar: data.metadata,
+          weekday,
+          searched_from: firstDate,
+          days_ahead,
+          timezone: timeZone,
+          skipped,
+        };
+      },
+    );
+  }
 
   registerTool(
     server,
