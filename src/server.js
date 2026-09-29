@@ -309,13 +309,13 @@ function eventObjects(parsed) {
   return Object.values(parsed).filter((entry) => entry?.type === 'VEVENT');
 }
 
-function expandEvent(event, from, to) {
+function expandEvent(event, from, to, { fullDescription = false } = {}) {
   if (String(event.status || '').toUpperCase() === 'CANCELLED') return [];
 
   if (!event.rrule) {
     const times = baseEventTimes(event);
     if (!times || !overlaps(times.start, times.end, from, to)) return [];
-    return [normalizeOccurrence(event, event)];
+    return [normalizeOccurrence(event, event, { fullDescription })];
   }
 
   let instances;
@@ -335,7 +335,7 @@ function expandEvent(event, from, to) {
 
   return instances
     .filter((instance) => String(instance?.status ?? event.status ?? '').toUpperCase() !== 'CANCELLED')
-    .map((instance) => normalizeOccurrence(event, instance));
+    .map((instance) => normalizeOccurrence(event, instance, { fullDescription }));
 }
 
 function sortOccurrences(events) {
@@ -450,7 +450,7 @@ function registerCalendarTools(server) {
       const from = new Date(target.getTime() - 36 * 60 * 60 * 1000);
       const to = new Date(target.getTime() + 36 * 60 * 60 * 1000);
 
-      const occurrence = expandEvent(event, from, to).find(
+      const occurrence = expandEvent(event, from, to, { fullDescription: true }).find(
         (candidate) => candidate.occurrence_start === target.toISOString(),
       );
 
@@ -458,15 +458,10 @@ function registerCalendarTools(server) {
         return { status: 'not_found', uid, occurrence_start: target.toISOString() };
       }
 
-      const detailed = {
-        ...occurrence,
-        description: truncate(event.description, 8000),
-      };
-
       return {
         status: 'ok',
         calendar: data.metadata,
-        event: detailed,
+        event: occurrence,
       };
     },
   );
