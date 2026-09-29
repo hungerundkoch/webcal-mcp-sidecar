@@ -25,6 +25,7 @@ The server expands recurring events with RRULE, EXDATE and RECURRENCE-ID handlin
 - `list_calendars` — metadata for the configured feed
 - `search_events` — bounded date-range search with recurrence expansion
 - `get_event` — fetch one event by UID, optionally one specific recurring occurrence
+- `find_next_clear_weekday` — when `WEBCAL_PURPOSE=absence`, find the next weekday with no recorded absence; no employee roster is required
 
 All tools are read-only.
 
@@ -35,6 +36,7 @@ The preferred setup is a mounted secret file:
 ```text
 WEBCAL_URL_FILE=/run/secrets/webcal_url
 WEBCAL_DEFAULT_TZ=Europe/Berlin
+WEBCAL_PURPOSE=absence
 WEBCAL_CACHE_TTL_SECONDS=300
 ```
 
@@ -43,6 +45,7 @@ Optional environment variables:
 | Variable | Default | Purpose |
 | --- | ---: | --- |
 | `WEBCAL_NAME` | feed name / `Webcal` | Override the calendar display name |
+| `WEBCAL_PURPOSE` | `calendar` | Set to `absence` for an authoritative absence feed; enables `find_next_clear_weekday` |
 | `WEBCAL_DEFAULT_TZ` | `Europe/Berlin` | Fallback timezone |
 | `WEBCAL_CACHE_TTL_SECONDS` | `300` | In-memory feed cache TTL |
 | `WEBCAL_FETCH_TIMEOUT_MS` | `15000` | HTTP timeout |
@@ -91,6 +94,7 @@ Add this service to the existing Der Koch stack:
     environment:
       WEBCAL_URL_FILE: /run/secrets/webcal_url
       WEBCAL_DEFAULT_TZ: Europe/Berlin
+      WEBCAL_PURPOSE: absence
       WEBCAL_CACHE_TTL_SECONDS: '300'
     volumes:
       - '/etc/koch-secrets/webcal_url:/run/secrets/webcal_url:ro'
@@ -141,3 +145,10 @@ The feed is cached in memory for five minutes by default. Conditional requests u
 - No feed URL is returned by MCP tools.
 - Network and parse failures are deliberately reported without echoing the secret URL.
 - Search windows and response size are bounded to avoid pathological or hostile feeds.
+
+
+## Absence-calendar semantics
+
+For Clockodo-style absence feeds, set `WEBCAL_PURPOSE=absence`. In that mode the sidecar exposes `find_next_clear_weekday`.
+
+The tool treats the feed as the authoritative negative-availability source: a day with no overlapping absence event means nobody is recorded as absent, so everyone is present according to that feed. It deliberately does not require an employee roster and does not consult unrelated calendars.
